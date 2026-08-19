@@ -96,157 +96,96 @@ export async function getAnalytics() {
  * @returns {Promise<object>} prediction result consumed by FraudResult page
  */
 export async function predictFraud(form) {
-  // FUTURE:
-  // const res = await fetch(`${API_BASE}/api/predict`, {
-  //   method: "POST",
-  //   headers: { "Content-Type": "application/json" },
-  //   body: JSON.stringify(form),
-  // });
-  // return res.json();
+  const API_BASE =
+    import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
-  await delay(1600); // simulate model inference latency
+  const payload = {
+    transaction_id: form.transactionId,
+    amount: Number(form.amount),
+    currency: "INR",
+    transaction_type: form.transactionType,
+    merchant_category: form.merchantCategory,
+    location: form.location,
+    ip_address: form.ipAddress || "",
+    device_type: form.deviceType,
+    international_transfer: Boolean(form.internationalTransfer),
+    new_recipient: Boolean(form.newRecipient),
+    transaction_frequency: Number(form.transactionCount),
+    is_new_device: false,
+  };
 
-  const amount = Number(form.amount) || 0;
-  const prevAmount = Number(form.previousAmount) || 1;
-  const accountAge = Number(form.accountAge) || 0;
-  const txCount = Number(form.transactionCount) || 0;
-  const hour = Number((form.transactionTime || "12:00").split(":")[0]);
+  const response = await fetch(
+    `${API_BASE}/api/v1/transactions/analyze`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }
+  );
 
-  /** Each factor => { key, label, impact (0-100), triggered } */
-  const factors = [];
+  if (!response.ok) {
+    const errorText = await response.text();
 
-  const amountRatio = amount / Math.max(prevAmount, 1);
-  const amountImpact = Math.min(32, Math.round(amountRatio * 6));
-  factors.push({
-    key: "amount",
-    label: "Transaction Amount vs History",
-    impact: amountImpact,
-    triggered: amountRatio > 3 || amount > 200000,
-    detail: `Current ₹${amount.toLocaleString("en-IN")} vs previous ₹${prevAmount.toLocaleString(
-      "en-IN"
-    )} (${amountRatio.toFixed(1)}×)`,
-  });
-
-  const riskyLocation = /unknown|vpn|lagos|moscow/i.test(form.location || "");
-  factors.push({
-    key: "location",
-    label: "Geo-location Anomaly",
-    impact: riskyLocation ? 24 : 6,
-    triggered: riskyLocation,
-    detail: form.location || "Not provided",
-  });
-
-  const highVelocity = txCount > 8;
-  factors.push({
-    key: "frequency",
-    label: "Transaction Velocity",
-    impact: Math.min(20, Math.round(txCount * 1.8)),
-    triggered: highVelocity,
-    detail: `${txCount} transactions in the last 24 hours`,
-  });
-
-  const oddHour = hour <= 5;
-  factors.push({
-    key: "time",
-    label: "Time-of-day Pattern",
-    impact: oddHour ? 14 : 4,
-    triggered: oddHour,
-    detail: `Executed at ${form.transactionTime || "—"}`,
-  });
-
-  const riskyDevice = /api|bot|atm/i.test(form.deviceType || "");
-  factors.push({
-    key: "device",
-    label: "Device Fingerprint",
-    impact: riskyDevice ? 16 : 5,
-    triggered: riskyDevice,
-    detail: form.deviceType || "Not provided",
-  });
-
-  const newAccount = accountAge < 6;
-  factors.push({
-    key: "accountAge",
-    label: "Account Maturity",
-    impact: newAccount ? 13 : 3,
-    triggered: newAccount,
-    detail: `${accountAge} month(s) old`,
-  });
-
-  const crypto = /crypto|transfer|withdraw/i.test(form.transactionType || "");
-  factors.push({
-    key: "merchant",
-    label: "Channel / Category Risk",
-    impact: crypto ? 11 : 4,
-    triggered: crypto,
-    detail: form.transactionType || "Not provided",
-  });
-
-  if (form.internationalTransfer) {
-    factors.push({
-      key: "international",
-      label: "Cross-border Transfer",
-      impact: 12,
-      triggered: true,
-      detail: "International transfer flag enabled",
-    });
+    throw new Error(
+      `Transaction analysis failed (${response.status}): ${errorText}`
+    );
   }
 
-  if (form.newRecipient) {
-    factors.push({
-      key: "frequency",
-      label: "First-time Recipient",
-      impact: 9,
-      triggered: true,
-      detail: "Beneficiary added within the last 24 hours",
-    });
-  }
+  const data = await response.json();
 
-  const raw = factors.reduce((sum, f) => sum + f.impact, 0);
-  const riskScore = Math.max(3, Math.min(99, Math.round(raw)));
-  const riskLevel = riskLevelFromScore(riskScore);
-  const isFraud = riskScore >= 70;
+  const isFraud = data.verdict === "Fraudulent";
 
-  // --- Mock Explainable AI output (later: SHAP / LIME from the model service)
-  const reasons = factors
-    .filter((f) => f.triggered)
-    .sort((a, b) => b.impact - a.impact)
-    .map((f) => ({
-      key: f.key,
-      title: f.label,
-      text: explanationLibrary[f.key] ?? f.label,
-      detail: f.detail,
-      impact: f.impact,
-    }));
+  const factors = (data.risk_factors || []).map((factor) => ({
+    key: factor.feature,
+    label: factor.feature,
+    impact: factor.impact,
+    triggered: true,
+    detail: factor.explanation,
+  }));
 
-  if (reasons.length === 0) {
-    reasons.push({
-      key: "safe",
-      title: "Consistent Behaviour",
-      text: "All monitored features fall inside this account's normal behavioural range.",
-      detail: "No anomaly thresholds were crossed.",
-      impact: 0,
-    });
-  }
+  const reasons = (data.risk_factors || []).map((factor) => ({
+    key: factor.feature,
+    title: factor.feature,
+    text: factor.explanation,
+    detail: factor.explanation,
+    impact: factor.impact,
+  }));
 
-  const warnings = [];
-  if (amountRatio > 5) warnings.push("Amount exceeds 5× the customer's typical transaction size.");
-  if (riskyLocation) warnings.push("Originating IP resolves to an anonymising network.");
-  if (highVelocity) warnings.push("Velocity threshold breached — possible card testing.");
-  if (oddHour) warnings.push("Activity outside the customer's usual active hours.");
-  if (isFraud) warnings.push("Recommended action: hold funds and trigger manual review.");
+  const warnings = (data.triggered_rules || []).map((rule) => {
+    if (typeof rule === "string") return rule;
+
+    return (
+      rule.rule_name ||
+      rule.name ||
+      rule.description ||
+      rule.message ||
+      "A fraud detection rule was triggered."
+    );
+  });
 
   return {
-    transactionId: form.transactionId,
+    transactionId: data.transaction_id,
     isFraud,
-    verdict: isFraud ? "Fraudulent" : riskScore >= 40 ? "Suspicious" : "Genuine",
-    riskScore,
-    riskLevel,
-    confidence: Math.min(99, 62 + Math.round(Math.abs(riskScore - 50) * 0.7)),
-    modelVersion: "mock-xgboost-v2.4",
-    evaluatedAt: new Date().toISOString(),
+    verdict: data.verdict,
+    riskScore: data.risk_score,
+    riskLevel: data.risk_level,
+
+    confidence:
+      Number(data.confidence) <= 1
+        ? Math.round(Number(data.confidence) * 100)
+        : Math.round(Number(data.confidence)),
+
+    modelVersion: data.model_version,
+    evaluatedAt: data.evaluated_at,
+
     summary: { ...form },
-    factors: factors.sort((a, b) => b.impact - a.impact),
+
+    factors,
     reasons,
     warnings,
+
+    recommendedAction: data.recommended_action,
   };
 }
